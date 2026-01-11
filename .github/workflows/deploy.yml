@@ -32,5 +32,5 @@ jobs:
       - name: Update Lambda Function
         run: |
           aws lambda update-function-code \
-            --function-name generalScraperLambda \
-            --image-uri ${{ steps.login-ecr.outputs.registry }}/playwright/general_scraper:latest
+            --function-name detailsScraperLambda \
+            --image-uri ${{ steps.login-ecr.outputs.registry }}/playwright/details_scraper:latest
