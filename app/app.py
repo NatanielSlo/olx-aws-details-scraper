@@ -5,7 +5,6 @@ import os
 import boto3
 from datetime import datetime
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
 from src.utils.url_builder import UrlBuilder
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
@@ -56,7 +55,6 @@ class DetailedScraper:
 
     async def scrape_detailed_data(self, item):
         page = await self.context.new_page()
-        await stealth_async(page) # Ukrywamy ślady bota
         
         url = self.url_builder.build_product_url(item.get('url'))
         print(f"Scrapuję szczegóły: {url}")
