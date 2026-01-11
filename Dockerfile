@@ -1,7 +1,7 @@
 FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
 # 1. Dodajemy boto3 do instalacji (bez tego SQS nie zadziała)
-RUN pip install awslambdaric playwright boto3
+RUN pip install awslambdaric playwright boto3 playwright-stealth dateparser
 
 WORKDIR /var/task
 
