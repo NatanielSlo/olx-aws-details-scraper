@@ -11,6 +11,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 class DetailedScraper:
     def __init__(self, event):
+        self.semaphore = asyncio.Semaphore(5)
         self.url_builder = UrlBuilder()
         self.sqs = boto3.client('sqs')
         self.records = event.get('Records', [])
@@ -23,7 +24,16 @@ class DetailedScraper:
 
     async def start_browser(self):
         playwright = await async_playwright().start()
-        self.browser = await playwright.chromium.launch(headless=True)
+        self.browser = await playwright.chromium.launch(
+            headless=True, 
+            args=[
+                "--single-process",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--no-zygote"
+            ]
+        )
         self.context = await self.browser.new_context(
             user_agent=USER_AGENT,
             viewport={'width': 1280, 'height': 800}
@@ -48,52 +58,60 @@ class DetailedScraper:
             item = json.loads(record['body'])
             tasks.append(self.scrape_detailed_data(item))
         
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
         await self.browser.close()
         return results
 
     async def scrape_detailed_data(self, item):
-        page = await self.context.new_page()
-        
-        url = self.url_builder.build_product_url(item.get('url'))
-        print(f"Scrapuję szczegóły: {url}")
-
-        try:
+        async with self.semaphore:
+            page = await self.context.new_page()
             
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            url = self.url_builder.build_product_url(item.get('url'))
+            print(f"Scrapuję szczegóły: {url}")
 
-           
-            desc_loc = page.locator(".css-19duwlz")
-            if await desc_loc.count() > 0:
-                item["description"] = (await desc_loc.inner_text(timeout=5000)).replace("\n", " ")
+            try:
+                
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
             
-            params_container = page.locator('[data-testid="ad-parameters-container"]')
-            if await params_container.count() > 0:
-                params = await params_container.locator('p.css-13x8d99').all()
-                for p in params:
-                    text = await p.inner_text()
-                    if ":" in text:
-                        k, v = text.split(":", 1)
-                        item[k.strip().lower().replace(" ", "_")] = v.strip()
+                desc_loc = page.locator(".css-19duwlz")
+                if await desc_loc.count() > 0:
+                    item["description"] = (await desc_loc.inner_text(timeout=5000)).replace("\n", " ")
 
-            item["scraped_at_detailed"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            print(f"Zapisuję do DynamoDB: {item.get('url')}")
-            self.table.put_item(Item=item)
+                
+                params_container = page.locator('[data-testid="ad-parameters-container"]')
+                if await params_container.count() > 0:
+                    params = await params_container.locator('p.css-13x8d99').all()
+                    for p in params:
+                        text = await p.inner_text()
+                        if ":" in text:
+                            k, v = text.split(":", 1)
+                            item[k.strip().lower().replace(" ", "_")] = v.strip()
 
-            return item
+                item["scraped_at_detailed"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                print(f"Zapisuję do DynamoDB: {item.get('url')}")
+                self.table.put_item(Item=item)
 
-        except Exception as e:
-            print(f"Błąd przy {url}: {e}")
-            return None
-        finally:
-            await page.close()
+                return item
+
+            except Exception as e:
+                print(f"Błąd przy {url}: {e}")
+                return None
+            finally:
+                await page.close()
 
 def handler(event, context):
     scraper = DetailedScraper(event)
-    asyncio.run(scraper.process_all())
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    loop.run_until_complete(scraper.process_all())
     
     return {
         "statusCode": 200,
