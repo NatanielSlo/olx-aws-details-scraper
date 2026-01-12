@@ -71,11 +71,9 @@ class DetailedScraper:
             print(f"Scrapuję szczegóły: {url}")
 
             try:
-                
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            
                 desc_loc = page.locator(".css-19duwlz")
+                await desc_loc.wait_for(state="visible", timeout=10000)
                 if await desc_loc.count() > 0:
                     item["description"] = (await desc_loc.inner_text(timeout=5000)).replace("\n", " ")
 
@@ -89,13 +87,16 @@ class DetailedScraper:
                             k, v = text.split(":", 1)
                             item[k.strip().lower().replace(" ", "_")] = v.strip()
 
-                item["scraped_at_detailed"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                item["scraped_at_detailed"] = now
+                item["last_seen"] = now
                 
                 print(f"Zapisuję do DynamoDB: {item.get('url')}")
                 self.table.put_item(Item=item)
 
                 return item
-
+            
             except Exception as e:
                 print(f"Błąd przy {url}: {e}")
                 return None
