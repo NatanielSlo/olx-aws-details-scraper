@@ -15,10 +15,8 @@ class DetailedScraper:
         self.url_builder = UrlBuilder()
         self.sqs = boto3.client('sqs')
         self.records = event.get('Records', [])
-
         self.dynamodb = boto3.resource('dynamodb')
         self.table = self.dynamodb.Table(os.environ['DDB_TABLE'])
-
         self.browser = None
         self.context = None
 
@@ -43,9 +41,9 @@ class DetailedScraper:
             route.abort() if route.request.resource_type in ["image", "media", "font"] 
             else route.continue_()
         )
+        print("Browser Started")
 
     async def process_all(self):
-
         if not self.records:
             print("Brak rekordów do przetworzenia.")
             return
@@ -54,30 +52,47 @@ class DetailedScraper:
         
         tasks = []
         for record in self.records:
-            # SQS body jest stringiem, parsujemy go
             item = json.loads(record['body'])
             tasks.append(self.scrape_detailed_data(item))
         
+        # return_exceptions=True pozwala nam obsłużyć błędy po zakończeniu wszystkich zadań
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         await self.browser.close()
+        
+        # Sprawdzamy, czy którykolwiek task rzucił błędem. 
+        # Jeśli tak, rzucamy wyjątek na poziomie handlera, żeby SQS ponowił próbę.
+        for res in results:
+            if isinstance(res, Exception):
+                print(f"Krytyczny błąd w jednym z zadań: {res}")
+                raise res
+                
         return results
 
     async def scrape_detailed_data(self, item):
         async with self.semaphore:
             page = await self.context.new_page()
-            
             url = self.url_builder.build_product_url(item.get('url'))
-            print(f"Scrapuję szczegóły: {url}")
+            print(f"Rozpoczynam: {url}")
 
             try:
+                # Czekamy na domcontentloaded, ale potem i tak musimy czekać na selektor
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
+                # Czekamy aż opis będzie widoczny
                 desc_loc = page.locator(".css-19duwlz")
-                await desc_loc.wait_for(state="visible", timeout=10000)
-                if await desc_loc.count() > 0:
-                    item["description"] = (await desc_loc.inner_text(timeout=5000)).replace("\n", " ")
+                try:
+                    await desc_loc.wait_for(state="visible", timeout=8000)
+                except Exception:
+                    # DEBUG: Jeśli nie ma opisu, zrzuć fragment HTML
+                    content = await page.content()
+                    print(f"DEBUG HTML (pierwsze 1000 znaków): {content[:1000]}")
+                    raise Exception(f"Timeout: Nie znaleziono opisu (.css-19duwlz) na {url}")
 
-                
+                # Pobieramy opis
+                item["description"] = (await desc_loc.inner_text()).replace("\n", " ")
+
+                # Pobieramy parametry
                 params_container = page.locator('[data-testid="ad-parameters-container"]')
                 if await params_container.count() > 0:
                     params = await params_container.locator('p.css-13x8d99').all()
@@ -88,7 +103,6 @@ class DetailedScraper:
                             item[k.strip().lower().replace(" ", "_")] = v.strip()
 
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
                 item["scraped_at_detailed"] = now
                 item["last_seen"] = now
                 
@@ -98,23 +112,24 @@ class DetailedScraper:
                 return item
             
             except Exception as e:
-                print(f"Błąd przy {url}: {e}")
-                return None
+                print(f"Błąd przy {url}: {str(e)}")
+                # Rzucamy błąd dalej, żeby proces_all wiedział o porażce
+                raise e 
             finally:
                 await page.close()
 
 def handler(event, context):
     scraper = DetailedScraper(event)
-
+    
+    # Używamy asyncio.run dla czystszego zarządzania pętlą w AWS Lambda
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    loop.run_until_complete(scraper.process_all())
+        asyncio.run(scraper.process_all())
+    except Exception as e:
+        print(f"Lambda zakończona błędem (SQS ponowi próbę): {e}")
+        # Ponowne rzucenie błędu informuje SQS o niepowodzeniu
+        raise e
     
     return {
         "statusCode": 200,
-        "body": "Scrapowanie szczegółów zakończone."
+        "body": "Scrapowanie szczegółów zakończone sukcesem."
     }
